@@ -33,6 +33,7 @@ fn get_terminal(terminal_type: TerminalType) -> Box<dyn Terminal> {
 	}
 }
 
+
 fn main () -> std::io::Result<()> {
 	let args: Vec<String> = env::args().collect();
 	let program = args[0].clone();

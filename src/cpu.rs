@@ -1,7 +1,10 @@
 extern crate fnv;
+extern crate sha3;
+extern crate rand;
 
 use self::fnv::FnvHashMap;
-
+use self::sha3::{Digest, Sha3_256};
+use self::rand::Rng;
 use mmu::{AddressingMode, Mmu};
 use terminal::Terminal;
 
@@ -34,6 +37,7 @@ const CSR_MISA_ADDRESS: u16 = 0x301;
 const CSR_MEDELEG_ADDRESS: u16 = 0x302;
 const CSR_MIDELEG_ADDRESS: u16 = 0x303;
 const CSR_MIE_ADDRESS: u16 = 0x304;
+
 
 const CSR_MTVEC_ADDRESS: u16 = 0x305;
 const _CSR_MSCRATCH_ADDRESS: u16 = 0x340;
@@ -73,7 +77,10 @@ pub struct Cpu {
 	is_reservation_set: bool,
 	_dump_flag: bool,
 	decode_cache: DecodeCache,
-	unsigned_data_mask: u64
+	unsigned_data_mask: u64,
+	hasher: Sha3_256, //added by ez2take
+	top: u64,         //added by ez2take using upper 25bits
+	key: u64          //added by ez2take
 }
 
 #[derive(Clone)]
@@ -233,7 +240,10 @@ impl Cpu {
 			is_reservation_set: false,
 			_dump_flag: false,
 			decode_cache: DecodeCache::new(),
-			unsigned_data_mask: 0xffffffffffffffff
+			unsigned_data_mask: 0xffffffffffffffff,
+			hasher: Sha3_256::new(),					//added by ez2take
+			top: rand::thread_rng().gen::<u64>() & !0x7fffffffffu64,	//added by ez2take
+			key: rand::thread_rng().gen()				//added by ez2take
 		};
 		cpu.x[0xb] = 0x1020; // I don't know why but Linux boot seems to require this initialization
 		cpu.write_csr_raw(CSR_MISA_ADDRESS, 0x800000008014312f);
@@ -1683,7 +1693,7 @@ fn get_register_name(num: usize) -> &'static str {
 	}
 }
 
-const INSTRUCTION_NUM: usize = 116;
+const INSTRUCTION_NUM: usize = 118;			//modifed by ez2take 116=>118
 
 // @TODO: Reorder in often used order as 
 const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
@@ -3369,6 +3379,55 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
 		},
 		disassemble: dump_format_i
 	},
+	Instruction {
+		mask: 0xfffff03f,
+		data: 0x0000000b,		//custom-0:inst[6:0]=0b001011 & funct3=0b000 & funct7=0b0000000
+		name: "ZIP",
+		operation: |cpu, word, _address| {
+			let f = parse_format_r(word);
+			let masked_ra = cpu.x[f.rd] as u64 & 0x7fffffffffu64;
+			cpu.x[f.rd] = (cpu.top | masked_ra) as i64;
+			cpu.hasher.update(cpu.key.to_be_bytes());
+			cpu.hasher.update((cpu.top | masked_ra).to_be_bytes()); //rv64 with sv39 uses only lower 39 bits of ra register
+			let hash = cpu.hasher.finalize_reset();
+			cpu.top=((hash[0]as u64) << 24
+					|(hash[1]as u64) << 16
+					|(hash[2]as u64) << 8
+					|(hash[3]as u64)) << 39;
+			Ok(())
+		},
+		disassemble: dump_format_r
+	},
+	Instruction {
+		mask: 0xfffff03f,
+		data: 0x0000100b,		//custom-0:inst[6:0]=0b001011 & funct3=0b001 & funct7=0b0000000
+		name: "UNZIP",
+		operation: |cpu, word, _address| {
+			let f = parse_format_r(word);
+			let masked_ra = cpu.x[f.rd] as u64 &  0x7fffffffffu64;
+			let old_hash  = cpu.x[f.rd] as u64 & !0x7fffffffffu64;
+
+			cpu.hasher.update(cpu.key.to_be_bytes());
+			cpu.hasher.update(cpu.x[f.rd].to_be_bytes());
+			let hash = cpu.hasher.finalize_reset();
+			let hash =  ((hash[0]as u64) << 24
+						|(hash[1]as u64) << 16
+						|(hash[2]as u64) << 8
+						|(hash[3]as u64)) << 39;
+
+			if cpu.top != hash {
+				return Err(Trap {
+					trap_type: TrapType::IllegalInstruction,
+					value: cpu.pc.wrapping_sub(4)
+				});
+			}
+
+			cpu.top = old_hash;
+			cpu.x[f.rd] = masked_ra as i64;
+			Ok(())
+		},
+		disassemble: dump_format_r
+	},
 ];
 
 /// The number of results [`DecodeCache`](struct.DecodeCache.html) holds.
@@ -3719,6 +3778,15 @@ mod test_cpu {
 			Ok(inst) => assert_eq!(inst.name, "ADDI"),
 			Err(_e) => panic!("Failed to decode")
 		};
+		// 0xb is zip & 0x100b is unzip 
+		match cpu.decode(0xb) {
+			Ok(inst) => assert_eq!(inst.name,"ZIP"),
+			Err(_e) => panic!("Failed to decode")
+		};
+		match cpu.decode(0x100b) {
+			Ok(inst) => assert_eq!(inst.name,"UNZIP"),
+			Err(_e) => panic!("Failed to decode")
+		};
 		// .decode() returns error for invalid word data.
 		match cpu.decode(0x0) {
 			Ok(_inst) => panic!("Unexpectedly succeeded in decoding"),
@@ -3889,6 +3957,53 @@ mod test_cpu {
 		// No effect to PC
 		assert_eq!(DRAM_BASE, cpu.read_pc());
 	}
+
+	#[test]
+	fn zipper_stack() {
+		let handler_vector = 0x10000000;
+
+		let mut cpu = create_cpu();
+		cpu.get_mut_mmu().init_memory(12);
+		cpu.write_csr_raw(CSR_MTVEC_ADDRESS, handler_vector);
+		cpu.x[1]=0x12345678i64;
+		cpu.update_pc(DRAM_BASE);
+
+		// Write non-compressed "zip x1(ra)" instruction
+		match cpu.get_mut_mmu().store_word(DRAM_BASE, 0x0000008b) {
+			Ok(()) => {},
+			Err(_e) => panic!("Failed to store")
+		};
+		// Write non-compressed "addi x1, x1, 0" instruction
+		match cpu.get_mut_mmu().store_word(DRAM_BASE + 4, 0x00008093) {
+			Ok(()) => {},
+			Err(_e) => panic!("Failed to store")
+		};
+		// Write non-compressed "unzip x1(ra)" instruction
+		match cpu.get_mut_mmu().store_word(DRAM_BASE + 8, 0x0000108b) {
+			Ok(()) => {},
+			Err(_e) => panic!("Failed to store")
+		};
+		println!("\n------------- before zip ------------");
+		println!("cpu.x : {:x?}",cpu.x);
+		println!("cpu.top : {:x}, cpu.key : {:x}",cpu.top,cpu.key);
+		
+
+		cpu.tick();
+		println!("\n-------after zip & before unzip ------");
+		println!("cpu.x : {:x?}",cpu.x);
+		println!("cpu.top : {:x}, cpu.key : {:x}",cpu.top,cpu.key);
+		cpu.tick();
+		cpu.tick();
+		println!("\n------------- after unzip ------------");
+		println!("cpu.x : {:x?}",cpu.x);
+		println!("cpu.pc : {:x}, cpu.top : {:x}, cpu.key : {:x}",cpu.pc,cpu.top,cpu.key);
+		
+		let cause = cpu.read_csr_raw(CSR_MCAUSE_ADDRESS);
+		let _trap_value = cpu.read_csr_raw(CSR_MTVAL_ADDRESS);
+		assert_eq!(cause,0);
+		//assert_eq!(cause,2);
+		//assert_eq!(trap_value,DRAM_BASE+8)
+	}
 }
 
 #[cfg(test)]
@@ -3938,7 +4053,6 @@ mod test_decode_cache {
 		for i in 1..DECODE_CACHE_ENTRY_NUM + 1 {
 			cache.insert(i as u32, i + 1);
 		}
-
 		// The oldest entry should have been removed because of the overflow
 		match cache.get(0) {
 			Some(_index) => panic!("Unexpected cache hit"),
