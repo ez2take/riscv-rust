@@ -1,0 +1,71 @@
+diff --git a/llvm/lib/Target/RISCV/RISCVFrameLowering.cpp b/llvm/lib/Target/RISCV/RISCVFrameLowering.cpp
+index 15d93d8f5874..eff44469a852 100644
+--- a/llvm/lib/Target/RISCV/RISCVFrameLowering.cpp
++++ b/llvm/lib/Target/RISCV/RISCVFrameLowering.cpp
+@@ -398,6 +398,9 @@ void RISCVFrameLowering::emitPrologue(MachineFunction &MF,
+   if (RealStackSize == 0 && !MFI.adjustsStack() && RVVStackSize == 0)
+     return;
+ 
++  //　スタックフレーム生成直前にZIP命令を挿入 
++  BuildMI(MBB, MBBI, DL, TII->get(RISCV::ZIP),RISCV::X1); // I forcely consider any function use x1 for restoring the return address.
++
+   // If the stack pointer has been marked as reserved, then produce an error if
+   // the frame requires stack allocation
+   if (STI.isRegisterReservedByUser(SPReg))
+@@ -535,6 +538,7 @@ void RISCVFrameLowering::emitPrologue(MachineFunction &MF,
+ void RISCVFrameLowering::emitEpilogue(MachineFunction &MF,
+                                       MachineBasicBlock &MBB) const {
+   const RISCVRegisterInfo *RI = STI.getRegisterInfo();
++  const RISCVInstrInfo *TII = STI.getInstrInfo();  //BuildMI使用のため追加
+   MachineFrameInfo &MFI = MF.getFrameInfo();
+   auto *RVFI = MF.getInfo<RISCVMachineFunctionInfo>();
+   Register FPReg = getFPReg(STI);
+@@ -610,6 +614,10 @@ void RISCVFrameLowering::emitEpilogue(MachineFunction &MF,
+   // Deallocate stack
+   adjustReg(MBB, MBBI, DL, SPReg, SPReg, StackSize, MachineInstr::FrameDestroy);
+ 
++
++  //　スタックフレーム破棄直後にUNZIP命令を挿入 
++  BuildMI(MBB, MBBI, DL, TII->get(RISCV::UNZIP),RISCV::X1); // I forcely consider any function use x1 for restoring the return address.
++
+   // Emit epilogue for shadow call stack.
+   emitSCSEpilogue(MF, MBB, MBBI, DL);
+ }
+diff --git a/llvm/lib/Target/RISCV/RISCVInstrFormats.td b/llvm/lib/Target/RISCV/RISCVInstrFormats.td
+index 8c198989d634..88af1a763eae 100644
+--- a/llvm/lib/Target/RISCV/RISCVInstrFormats.td
++++ b/llvm/lib/Target/RISCV/RISCVInstrFormats.td
+@@ -132,6 +132,7 @@ def OPC_BRANCH    : RISCVOpcode<0b1100011>;
+ def OPC_JALR      : RISCVOpcode<0b1100111>;
+ def OPC_JAL       : RISCVOpcode<0b1101111>;
+ def OPC_SYSTEM    : RISCVOpcode<0b1110011>;
++def OPC_CUSTOM0   : RISCVOpcode<0b0001011>;
+ 
+ class RVInst<dag outs, dag ins, string opcodestr, string argstr,
+              list<dag> pattern, InstFormat format>
+diff --git a/llvm/lib/Target/RISCV/RISCVInstrInfo.td b/llvm/lib/Target/RISCV/RISCVInstrInfo.td
+index 495c39132ca3..81e2bb56756e 100644
+--- a/llvm/lib/Target/RISCV/RISCVInstrInfo.td
++++ b/llvm/lib/Target/RISCV/RISCVInstrInfo.td
+@@ -604,6 +604,21 @@ def SRAW  : ALUW_rr<0b0100000, 0b101, "sraw">,
+             Sched<[WriteShiftReg32, ReadShiftReg32, ReadShiftReg32]>;
+ } // Predicates = [IsRV64]
+ 
++ // ZIP 命令の定義を追加
++ let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
++ def ZIP : RVInstR<0b0000000, 0b000, OPC_CUSTOM0, (outs GPR:$rd), (ins),
++                    "zip", "$rd">, Sched<[]> {
++    let rs1 = 0;
++    let rs2 = 0;
++  }
++
++ // UNZIP 命令の定義を追加
++ let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
++ def UNZIP : RVInstR<0b0000000, 0b001, OPC_CUSTOM0, (outs GPR:$rd), (ins),
++                    "unzip", "$rd">, Sched<[]> {
++    let rs1 = 0;
++    let rs2 = 0;
++  }
+ //===----------------------------------------------------------------------===//
+ // Privileged instructions
+ //===----------------------------------------------------------------------===//

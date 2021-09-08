@@ -242,8 +242,8 @@ impl Cpu {
 			decode_cache: DecodeCache::new(),
 			unsigned_data_mask: 0xffffffffffffffff,
 			hasher: Sha3_256::new(),					//added by ez2take
-			top: rand::thread_rng().gen::<u64>() & !0x7fffffffffu64,	//added by ez2take
-			key: rand::thread_rng().gen()				//added by ez2take
+			top: rand::thread_rng().gen::<u64>() & !0x7f_ffff_ffffu64,										//added by ez2take
+			key: rand::thread_rng().gen()										//added by ez2take
 		};
 		cpu.x[0xb] = 0x1020; // I don't know why but Linux boot seems to require this initialization
 		cpu.write_csr_raw(CSR_MISA_ADDRESS, 0x800000008014312f);
@@ -3380,7 +3380,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
 		disassemble: dump_format_i
 	},
 	Instruction {
-		mask: 0xfffff03f,
+		mask: 0xfffff07f,
 		data: 0x0000000b,		//custom-0:inst[6:0]=0b001011 & funct3=0b000 & funct7=0b0000000
 		name: "ZIP",
 		operation: |cpu, word, _address| {
@@ -3399,7 +3399,7 @@ const INSTRUCTIONS: [Instruction; INSTRUCTION_NUM] = [
 		disassemble: dump_format_r
 	},
 	Instruction {
-		mask: 0xfffff03f,
+		mask: 0xfffff07f,
 		data: 0x0000100b,		//custom-0:inst[6:0]=0b001011 & funct3=0b001 & funct7=0b0000000
 		name: "UNZIP",
 		operation: |cpu, word, _address| {

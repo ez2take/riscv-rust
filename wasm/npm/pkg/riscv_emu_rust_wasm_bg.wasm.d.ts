@@ -19,5 +19,7 @@ export function wasmriscv_put_input(a: number, b: number): void;
 export function wasmriscv_enable_page_cache(a: number, b: number): void;
 export function wasmriscv_get_address_of_symbol(a: number, b: number, c: number, d: number, e: number, f: number): void;
 export function __wbindgen_malloc(a: number): number;
+export function __wbindgen_add_to_stack_pointer(a: number): number;
 export function __wbindgen_free(a: number, b: number): void;
 export function __wbindgen_realloc(a: number, b: number, c: number): number;
+export function __wbindgen_exn_store(a: number): void;
